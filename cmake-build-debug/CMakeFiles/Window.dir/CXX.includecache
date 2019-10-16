@@ -1,0 +1,44 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/Users/Kleinman/Documents/Programming/C:C++/DH2323-Computer_Graphics_and_Interaction/source/window.cpp
+/opt/X11/include/X11/Xlib.h
+-
+stdio.h
+-
+stdlib.h
+-
+
+/opt/X11/include/X11/X.h
+X11/Xmd.h
+-
+
+/opt/X11/include/X11/Xfuncproto.h
+
+/opt/X11/include/X11/Xlib.h
+sys/types.h
+-
+stdint.h
+-
+X11/X.h
+-
+X11/Xfuncproto.h
+-
+X11/Xosdefs.h
+-
+stddef.h
+-
+stdlib.h
+-
+
+/opt/X11/include/X11/Xmd.h
+sys/isa_defs.h
+-
+
+/opt/X11/include/X11/Xosdefs.h
+

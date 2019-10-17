@@ -83,7 +83,7 @@ Window CreateWindow(const std::string& name, const int width, const int height)
 	SDL_Renderer* renderer;
 
 	unsigned window_flags   = 0;                       // https://wiki.libsdl.org/SDL_WindowFlags
-	unsigned renderer_flags = SDL_RENDERER_SOFTWARE;  // https://wiki.libsdl.org/SDL_RendererFlags
+	unsigned renderer_flags = SDL_RENDERER_SOFTWARE;   // https://wiki.libsdl.org/SDL_RendererFlags
 
 	window = SDL_CreateWindow(name.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height, window_flags);
 

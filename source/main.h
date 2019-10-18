@@ -63,6 +63,14 @@ struct Array
 	T*  data;
 };
 
+template <typename T = u8>
+struct Array2D
+{
+	u16 rows;
+	u16 columns;
+	T* data;
+};
+
 
 struct Memory
 {

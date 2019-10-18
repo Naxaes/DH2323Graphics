@@ -10,10 +10,9 @@ REM EHsc   -
 REM EHa    - 
 REM nologo - Don't show compiler info when compiling.
 REM subsystem:windows,5.1 - Make compatible with Windows XP.
-REM MD     - Dynamically link CRT.
-REM MT     - Statically link CRT. Required to make compatiable with other Windows versions.
+REM MD     - Dynamically link multi-threaded CRT.
+REM MT     - Statically link multi-threaded CRT. Required to make compatiable with other Windows versions.
 REM opt:ref - Try to remove unused code.
-REM Gm-    - Disable minimal rebuild.
 REM GR-    - Disable run-time type information, RTTI.
 REM Fm     - Creates a map file at specified path.
 REM LD     - Creates a dynamic-link library.
@@ -30,13 +29,28 @@ REM C4100 - Unreferenced formal parameter.
 REM C4189 - Local variable is initialized but not referenced.
 REM C4505 - Unreferenced local function has been removed.
 
-set MAIN=%1
+set DEBUG=1
+set GAME=1
+set PLATFORM=1
+
+if "%1"=="release"  set DEBUG=0
+if "%2"=="release"  set DEBUG=0
+ 
+if "%1"=="platform" set GAME=0
+if "%2"=="platform" set GAME=0
+
+if "%1"=="game" set PLATFORM=0
+if "%2"=="game" set PLATFORM=0
+
+REM Visual Studio locks the PDB, even though we release the DLL.
+REM Workaround is to generate a new PDB file everytime and delete the previous when
+REM Visual Studio realeses them.
+set PDB_OUTPUT="temp_%date:~-4,4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2%%time:~6,2%.pdb"
 
 set WARNINGS=-W4 -WX -wd4100 -wd4201 -wd4505
-set DEBUG=-Zi -Od
 
-set SHARED_COMPILER_FLAGS=-Od -Oi -Zi -MT -nologo -Gm- -GR- -EHa- -DUNICODE -D_CRT_SECURE_NO_WARNINGS %WARNINGS%
-set SHARED_LINKER_FLAGS=
+set SHARED_COMPILER_FLAGS=-Oi -MT -fp:fast -nologo -GR- -EHa- -DUNICODE -D_CRT_SECURE_NO_WARNINGS %WARNINGS%
+set SHARED_LINKER_FLAGS=-incremental:no -opt:ref
 
 set WIN32_COMPILER_FLAGS=
 set WIN32_LINKER_FLAGS=user32.lib gdi32.lib winmm.lib
@@ -45,17 +59,34 @@ set WIN32_SOURCE_FILES=..\source\win32_main.cpp
 set WIN32_INCLUDE_FOLDER=
 
 set GAME_COMPILER_FLAGS=-LDd
-set GAME_LINKER_FLAGS=-DLL
+set GAME_LINKER_FLAGS=-DLL -PDB:%PDB_OUTPUT%
 set GAME_OUTPUT_FILE=main.dll
 set GAME_SOURCE_FILES=..\source\lab1.cpp
 set GAME_INCLUDE_FOLDER=..\libraries\glm
 
 
-if not exist build  mkdir build
+if "%DEBUG%"=="1" (
+	echo Compiling with debug configurations.
+	set SHARED_COMPILER_FLAGS=-Od -Zi %SHARED_COMPILER_FLAGS%
+	set GAME_COMPILER_FLAGS=-LDd %GAME_COMPILER_FLAGS%
+) else (
+	echo Compiling with release configurations.
+	set SHARED_COMPILER_FLAGS=-O2 %SHARED_COMPILER_FLAGS%
+	set GAME_COMPILER_FLAGS=-LD %GAME_COMPILER_FLAGS%
+)
+
+
+if not exist "build"  mkdir "build"
 pushd build
 
-cl  %SHARED_COMPILER_FLAGS% %GAME_COMPILER_FLAGS%    %GAME_SOURCE_FILES%  -I%GAME_INCLUDE_FOLDER%  -Fe:%GAME_OUTPUT_FILE%   -link   %SHARED_LINKER_FLAGS% %GAME_LINKER_FLAGS%
-cl  %SHARED_COMPILER_FLAGS% %WIN32_COMPILER_FLAGS%   %WIN32_SOURCE_FILES% -I%WIN32_INCLUDE_FOLDER%							-link   %SHARED_LINKER_FLAGS% %WIN32_LINKER_FLAGS%
+del *.pdb > nul 2>&1
+
+if "%GAME%"=="1" (
+	cl  %SHARED_COMPILER_FLAGS% %GAME_COMPILER_FLAGS%    %GAME_SOURCE_FILES%  -I%GAME_INCLUDE_FOLDER%  -Fe:%GAME_OUTPUT_FILE%   -link  %SHARED_LINKER_FLAGS% %GAME_LINKER_FLAGS%
+) 
+if "%PLATFORM%"=="1" (
+	cl  %SHARED_COMPILER_FLAGS% %WIN32_COMPILER_FLAGS%   %WIN32_SOURCE_FILES% -I%WIN32_INCLUDE_FOLDER%	-opt:ref				-link  %SHARED_LINKER_FLAGS% %WIN32_LINKER_FLAGS% 
+)
 
 
 popd

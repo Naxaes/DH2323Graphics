@@ -10,11 +10,18 @@
 // FIX(ted): THIS PRESUMABLY ONLY WORKS ON UNIX. FIX!
 #include <signal.h>    // raise(SIGINT)
 
+#define MAX_U8  0xFF
+#define MAX_U16 0xFFFF
+#define MAX_U32 0xFFFFFFFF
+#define MAX_U64 0xFFFFFFFFFFFFFFFF
+
+
 
 #define PI32 3.1415927410125732421875f
 
-
 #define cast(x, type) static_cast<type>(x)
+
+#define ASSERT(condition, ...) do { if (!(condition)) exit(2); } while(0)
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -36,24 +43,43 @@ typedef double f64;
 #define TERABYTES(x) (GIGABYTES(x) * 1024ULL)
 
 
-u32 RoundToU32(f32 x)
+inline u16 RoundToU16(f32 x)
 {
+	ASSERT(0 <= x && x <= MAX_U16);
+	u16 result = cast(x + 0.5f, u16);
+	return result;
+}
+inline u16 FloorToU16(f32 x)
+{
+	ASSERT(0 <= x && x <= MAX_U16);
+	u16 result = cast(x, u16);
+	return result;
+}
+inline u32 RoundToU32(f32 x)
+{
+	ASSERT(0 <= x && x <= MAX_U32);
 	u32 result = cast(x + 0.5f, u32);
 	return result;
 }
-
-u32 RoundToS32(f32 x)
+inline u64 RoundToU64(f32 x)
 {
-	s32 result = cast(x + 0.5f, s32);
+	ASSERT(0 <= x && x <= MAX_U64);
+	u64 result = cast(x + 0.5f, u64);
+	return result;
+}
+
+inline u32 RoundToS32(f32 x)
+{
+	s32 result = (x >= 0) ? cast(x + 0.5f, s32) : cast(x - 0.5f, s32);
 	return result;
 }
 
 
 struct Buffer
 {
-	u32 count;  // Maximum 4GB
+	u32 size;
 	u32 used;
-	u8* data;
+	u8*	data;
 };
 
 template <typename T = u8>
@@ -68,129 +94,79 @@ struct Array2D
 {
 	u16 rows;
 	u16 columns;
-	T* data;
+	T*  data;
+
+	T& operator() (u32 row, u32 column) { return data[row * rows + column]; }
 };
 
+
+struct Memory;
+
+typedef bool	  (*PlatformWriteAsset) (const char* name, Buffer buffer);
+typedef Array<u8> (*PlatformReadAsset)  (const char* name, Memory& memory);
 
 struct Memory
 {
-	Buffer   persistent;
-	Buffer   temporary;
-	intptr_t stack_reference;
-	bool	 initialized;
+	Buffer	  persistent;
+	Buffer    temporary;
+	uintptr_t stack_reference;
+	bool	  initialized;
+
+	PlatformWriteAsset WriteAsset;
+	PlatformReadAsset  ReadAsset;
 };
 
-template <typename T = u8>
-Array<T>* AllocatePersistantArray(Memory& memory, u32 count, u32 decrement_if_fail = 0, u32 minimum_allowed_count = 0)
+inline bool HasOverflown(u32 a, u32 b, u32 result)
 {
-	u64 total_size = sizeof(Array<T>) + sizeof(T) * count;
+	return (result < a || result < b);
+}
 
-	while (memory.persistent.used + total_size >= memory.persistent.count || memory.persistent.used + total_size < memory.persistent.used /* Overflow */)
+template <typename T = u8>
+Array<T> AllocateArray(Buffer& memory, u32 count, u32 decrement_if_fail = 0, u32 minimum_allowed_count = 1)
+{
+	Array<T> array;
+
+	u32 total_size = sizeof(T) * count;
+	ASSERT(!HasOverflown(sizeof(T), count, total_size));
+
+	u32 used_memory_after_allocation = memory.used + total_size;
+	while (used_memory_after_allocation >= memory.size || HasOverflown(memory.used, total_size, used_memory_after_allocation))
 	{
-		if (count <= minimum_allowed_count || decrement_if_fail == 0)
-			return 0;
+		if (count > minimum_allowed_count && decrement_if_fail != 0)
+		{
+			array.count = 0;
+			array.data  = 0;
+			return array;
+		}
 
 		count -= decrement_if_fail;
-		total_size = sizeof(Array<T>) + sizeof(T) * count;
+		total_size = sizeof(T) * count;
+		used_memory_after_allocation = memory.used + total_size;
 	}
 
-	Array<T>* buffer = reinterpret_cast<Array<T>*>(memory.persistent.data + memory.persistent.used);
-	
-	buffer->count = count;
-	buffer->data  = reinterpret_cast<T*>(buffer + 1);
+	array.count = count;
+	array.data  = reinterpret_cast<T*>(memory.data + memory.used);
 
-	memory.persistent.used += cast(total_size, u32);
+	memory.used = used_memory_after_allocation;
 
-	return buffer;
+	return array;
 }
 template <typename T>
-T* AllocatePersistantObject(Memory& memory)
+T* AllocateObject(Buffer& memory)
 {
-	size_t size = sizeof(T);
+	u32 size = sizeof(T);
 
-	if (memory.persistent.used + size >= memory.persistent.count || memory.persistent.used + size < memory.persistent.used /* Overflow */)
+	u32 used_memory_after_allocation = memory.used + size;
+	if (used_memory_after_allocation >= memory.size || HasOverflown(memory.used, size, used_memory_after_allocation))
 		return 0;
 
-	T* data = reinterpret_cast<T*>(memory.persistent.data + memory.persistent.used);
-	memory.persistent.used += size;
+	T* object = reinterpret_cast<T*>(memory.data);
 
-	return data;
+	memory.used = used_memory_after_allocation;
+
+	return object;
 }
 
-template <typename T = u8>
-Array<T>* AllocateTemporaryArray(Memory & memory, u32 count, u32 decrement_if_fail = 0, u32 minimum_allowed_count = 0)
-{
-	u64 total_size = sizeof(Array<T>) + sizeof(T) * count;
-
-	while (memory.temporary.used + total_size >= memory.temporary.size || memory.temporary.used + total_size < memory.temporary.used /* Overflow */)
-	{
-		if (count <= minimum_allowed_count || decrement_if_fail == 0)
-			return 0;
-
-		count -= decrement_if_fail;
-		total_size = sizeof(Array<T>) + sizeof(T) * count;
-	}
-
-	Array<T>* buffer = reinterpret_cast<Array<T>*>(memory.temporary.data + memory.temporary.used);
-
-	buffer->count = count;
-	buffer->data  = reinterpret_cast<T*>(buffer + 1);
-
-	memory.temporary.used += cast(total_size, u32);
-
-	return buffer;
-}
-template <typename T>
-T* AllocateTemporaryObject(Memory& memory)
-{
-	size_t size = sizeof(T);
-
-	if (memory.temporary.used + size >= memory.temporary.count || memory.temporary.used + size < memory.temporary.used /* Overflow */)
-		return 0;
-
-	T* data = reinterpret_cast<T*>(memory.temporary.data + memory.temporary.used);
-	memory.temporary.used += size;
-
-	return data;
-}
-template <typename T = u8>
-Array<T>* PushStackArray(Memory& memory, u32 count, u32 decrement_if_fail = 0, u32 minimum_allowed_count = 0)
-{
-	u64 total_size = sizeof(Array<T>) + sizeof(T) * count;
-
-	while (memory.temporary.used + total_size >= memory.temporary.count || memory.temporary.used + total_size < memory.temporary.used /* Overflow */)
-	{
-		if (count <= minimum_allowed_count || decrement_if_fail == 0)
-			return 0;
-
-		count -= decrement_if_fail;
-		total_size = sizeof(Array<T>) + sizeof(T) * count;
-	}
-
-	Array<T>* buffer = reinterpret_cast<Array<T>*>(memory.temporary.data + memory.temporary.used);
-
-	buffer->count = count;
-	buffer->data  = reinterpret_cast<T*>(buffer + 1);
-
-	memory.temporary.used += cast(total_size, u32);
-	memory.stack_reference = reinterpret_cast<intptr_t>(buffer) + cast(total_size, intptr_t);
-
-	return buffer;
-}
-template <typename T = u8>
-void PopStackArray(Memory& memory, Array<T>* buffer)
-{
-	u64 total_size = sizeof(Array<T>) + sizeof(T) * buffer->count;
-
-	if (memory.stack_reference - cast(total_size, intptr_t) != reinterpret_cast<intptr_t>(buffer))
-	{
-		// TODO(ted): Add logging.
-		exit(13);
-	}
-
-	memory.temporary.used -= cast(total_size, u32);
-	memory.stack_reference = reinterpret_cast<intptr_t>(memory.temporary.data + memory.temporary.used);
-}
 
 
 struct Pixel
@@ -202,13 +178,23 @@ struct Pixel
 #else
 	#error "Your operating system is not supported."
 #endif
+
+	Pixel(f32 r, f32 g, f32 b, f32 a) : r(r), g(g), b(b), a(a) {}
+
+	Pixel& operator= (const Pixel& other) { r = other.r; g = other.g; b = other.b; a = other.a; return *this;  }
+
+	Pixel operator* (f32 factor)		 const { return Pixel(r * factor,  g * factor,  b * factor,  a * factor);  }
+	Pixel operator+ (const Pixel& other) const { return Pixel(r + other.r, g + other.g, b + other.b, a + other.a); }
+	Pixel operator- (const Pixel& other) const { return Pixel(r - other.r, g - other.g, b - other.b, a - other.a); }
 };
 
 struct FrameBuffer
 {
-	s32 width;
-	s32 height;
+	u16    width;
+	u16    height;
 	Pixel* pixels;
+
+	Pixel& operator() (u16 row, u16 column) { return pixels[row * width + column]; }
 };
 
 #pragma pack(push, 1)
@@ -235,6 +221,7 @@ struct BitmapHeader
 
 f32 ExactLinearTosRGB(f32 L)
 {
+	// Clamp.
 	if (L < 0.0f)
 		L = 0.0f;
 	else if (L > 1.0f)
@@ -277,8 +264,8 @@ bool Screenshot(FrameBuffer buffer, const char* file_name)
 	header.file_size = sizeof(header) + size_of_image;
 	header.bitmap_offset = sizeof(header);
 	header.size = sizeof(header) - 14;
-	header.width = buffer.width;
-	header.height = -buffer.height;  // Negative numbers gives a direction of top-down instead of bottom-up.
+	header.width =  buffer.width;
+	header.height = buffer.height;  // Negative numbers gives a direction of top-down instead of bottom-up.
 	header.planes = 1;
 	header.bits_per_pixel = 32;
 	header.compression = 0;

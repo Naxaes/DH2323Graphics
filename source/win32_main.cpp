@@ -4,15 +4,28 @@
 #include <xinput.h>
 #include <dsound.h>
 
+#define StringLiteral(x)  {x, sizeof(x) - 1};
+
+
+/*
+Directory structure:
+    root
+	|- build
+	|- data
+	|- includes
+	|- source
+*/
+
 
 #define WIN32_REPORT_ERROR(...)                                                                         \
 do {                                                                                                    \
     char buffer1[255] = { 0 };                                                                          \
 	char buffer2[255] = { 0 };                                                                          \
     sprintf(buffer1, __VA_ARGS__);                                                                      \
-	sprintf(buffer2, "[Error]:\n\tFile: %s\n\tLine: %i\n\tMessage: %s", __FILE__, __LINE__, buffer1);   \
+	sprintf(buffer2, "[Error %d]:\n\tFile: %s\n\tLine: %i\n\tMessage: %s", GetLastError(), __FILE__, __LINE__, buffer1);   \
     OutputDebugStringA(buffer2);																		\
 } while(0)
+
 #define WIN32_ASSERT(condition, ...)			\
 do {											\
 	if (!(condition))							\
@@ -21,6 +34,10 @@ do {											\
 		exit(-1);								\
 	}											\
 } while(0)
+
+
+#include "win32_clock.cpp"
+
 
 
 
@@ -40,62 +57,41 @@ struct Win32Game
 {
 	HMODULE  dll_handle;
 	FILETIME time_loaded;
-	wchar_t  source[MAX_PATH];
+	char*	 source_dll;
+	char*	 runtime_dll;
 
 	InitializeFunction initialize;
 	UpdateFunction     update;
 	SoundFunction      sound;
 };
 
-struct Win32PerformanceCounter
-{
-	LARGE_INTEGER performance_counter;
-	u64 cycles_counter;
-};
-
 static Win32FrameBuffer win32_framebuffer;
 static FrameBuffer game_framebuffer;
 static bool running;
 
-static LARGE_INTEGER performance_frequency;
 
 
-static Win32PerformanceCounter Win32CreatePerformanceCounter()
+void BubbleSort(u64* array, u64 count)
 {
-	Win32PerformanceCounter counter = { 0 };
-
-	QueryPerformanceCounter(&counter.performance_counter);
-	counter.cycles_counter = __rdtsc();
-
-	return counter;
-}
-
-
-static f32 Win32TickPerformanceCounter(Win32PerformanceCounter& start)
-{
-	Win32PerformanceCounter stop = Win32CreatePerformanceCounter();
-
-	f32 performance_counter = 1000.0f * cast(stop.performance_counter.QuadPart - start.performance_counter.QuadPart, f32) / performance_frequency.QuadPart;
-	f32 cycles_counter = cast(stop.cycles_counter - start.cycles_counter, f32) / (1000.0f * 1000.0f);
-	f32 fps_counter = cast(performance_frequency.QuadPart, f32) / (stop.performance_counter.QuadPart - start.performance_counter.QuadPart);
-
-	static char buffer[255] = { 0 };
-	sprintf(buffer, "Milliseconds per frame: %.02f  |  FPS: %0.2f  |  Cycles per frame: %0.2f * 10^6\n", performance_counter, fps_counter, cycles_counter);
-	//OutputDebugStringA(buffer);
-
-	start.performance_counter = stop.performance_counter;
-	start.cycles_counter = stop.cycles_counter;
-
-	f32 dt = performance_counter / 1000.0f;
-
-	return dt;
+	for (u64 i = 0; i < count; ++i)
+	{
+		for (u64 j = i + 1; j < count; ++j)
+		{
+			if (array[i] > array[j])
+			{
+				u64 temp = array[i];
+				array[i] = array[j];
+				array[j] = temp;
+			}
+		}
+	}
 }
 
 
 // TODO(ted): Pre-allocate the maximum size at startup. The user should always be able
 // to resize to the maximum size, so if we pre-allocate we know that the game won't
 // crash at resize due to memory. It'll also simplify the code and make it more efficient.
-static void Win32ResizeFrameBuffer(Win32FrameBuffer& win32_buffer, FrameBuffer& framebuffer, int width, int height)
+static void Win32ResizeFrameBuffer(Win32FrameBuffer& win32_buffer, FrameBuffer& framebuffer, u16 width, u16 height)
 {
 	if (win32_buffer.pixels)
 		VirtualFree(win32_buffer.pixels, 0, MEM_RELEASE);
@@ -127,25 +123,17 @@ static void Win32ResizeFrameBuffer(Win32FrameBuffer& win32_buffer, FrameBuffer& 
 }
 
 
-static void Win32UpdateWindow(HDC device_context, Win32FrameBuffer& win32_buffer, FrameBuffer& framebuffer, u32 width, u32 height)
+static void Win32UpdateWindow(HDC device_context, Win32FrameBuffer& win32_buffer, RECT area)
 {
-	WIN32_ASSERT(win32_buffer.width == framebuffer.width && win32_buffer.height == framebuffer.height, "Win32 buffer and Framebuffer is asynchronized!");
-
-	for (int i = 0; i < framebuffer.width * framebuffer.height; ++i)
-	{
-		Pixel& color = framebuffer.pixels[i];
-		win32_buffer.pixels[i] = PackBGRA(
-			ExactLinearTosRGB(color.r) * 255.0f,
-			ExactLinearTosRGB(color.g) * 255.0f,
-			ExactLinearTosRGB(color.b) * 255.0f,
-			ExactLinearTosRGB(color.a) * 255.0f
-		);
-	}
+	u32 x = area.left;
+	u32 y = area.top;
+	u32 width  = area.right  - area.left;
+	u32 height = area.bottom - area.top;
 
 	int status = StretchDIBits(
 		device_context,
-		0, 0, width, height,   // Destination
-		0, 0, width, height,   // Source
+		x, y, width, height,   // Destination
+		x, y, width, height,   // Source
 		win32_buffer.pixels, &win32_buffer.info,
 		DIB_RGB_COLORS, SRCCOPY
 	);
@@ -170,16 +158,12 @@ static LRESULT CALLBACK Win32EventCallback(HWND window, UINT message, WPARAM wPa
 		} break;
 		case WM_PAINT:  // We repaint continuously.
 		{
-			RECT client_rect;
-			GetClientRect(window, &client_rect);
-
-			u32 width  = client_rect.right  - client_rect.left;
-			u32 height = client_rect.bottom - client_rect.top;
 
 			PAINTSTRUCT paint;
 			HDC device_context = BeginPaint(window, &paint);
 			
-			Win32UpdateWindow(device_context, win32_framebuffer, game_framebuffer, width, height);
+			RECT dirty_rect = paint.rcPaint;
+			Win32UpdateWindow(device_context, win32_framebuffer, dirty_rect);
 	
 			EndPaint(window, &paint);
 		} break;
@@ -187,14 +171,14 @@ static LRESULT CALLBACK Win32EventCallback(HWND window, UINT message, WPARAM wPa
 		{
 			RECT client_rect;
 			GetClientRect(window, &client_rect);
-			int width  = client_rect.right  - client_rect.left;
-			int height = client_rect.bottom - client_rect.top;
+			u16 width  = cast(client_rect.right  - client_rect.left, u16);
+			u16 height = cast(client_rect.bottom - client_rect.top,  u16);
 
 			Win32ResizeFrameBuffer(win32_framebuffer, game_framebuffer, width, height);
 		} break;
 		case WM_CLOSE:
 		{
-			if (MessageBox(window, L"Really quit?", L"My application", MB_OKCANCEL) == IDOK)
+			if (MessageBoxA(window, "Really quit?", "My application", MB_OKCANCEL) == IDOK)
 			{
 				DestroyWindow(window);
 				PostQuitMessage(0);
@@ -263,29 +247,52 @@ static void Win32ProcessEvents(Keyboard& keyboard)
 }
 
 
-static void Win32GetExecutableDirectory(TCHAR* path, size_t size)
+// Returns the index of the null terminator.
+static u32 Win32GetExecutableDirectory(char* path, size_t size)
 {
-	DWORD length = GetModuleFileNameW(NULL, path, size);
+	// @TODO(ted): size should be in TCHAR's.
+	DWORD length = GetModuleFileNameA(NULL, path, size);
 
 	for (int i = length; i >= 0; --i)
 	{
 		if (path[i] == '\\')
 		{
 			path[i + 1] = '\0';
-			return;
+			return i + 1;
 		}
 	}
 	
 	path[0] = '\0';
+	return 0;
 }
 
 
-static FILETIME Win32GetLastFileWriteTime(const wchar_t* filename)
+// Returns the index of the null terminator.
+static u32 Win32GetDataDirectory(char* path, size_t size)
+{
+	// @TODO(ted): size should be in TCHAR's.
+	DWORD length = GetModuleFileNameA(NULL, path, size);
+
+	for (int i = length; i >= 0; --i)
+	{
+		if (path[i] == '\\')
+		{
+			path[i + 1] = '\0';
+			return i + 1;
+		}
+	}
+
+	path[0] = '\0';
+	return 0;
+}
+
+
+static FILETIME Win32GetLastFileWriteTime(const char* filename)
 {
 	FILETIME write_time = { 0 };
 
 	WIN32_FIND_DATA data;
-	HANDLE handle = FindFirstFile(filename, &data);
+	HANDLE handle = FindFirstFileA(filename, &data);
 
 	if (handle != INVALID_HANDLE_VALUE)
 	{
@@ -297,10 +304,10 @@ static FILETIME Win32GetLastFileWriteTime(const wchar_t* filename)
 }
 
 
-static void Win32LoadGame(Win32Game& game, const wchar_t* source, wchar_t* destination)
+static void Win32LoadGame(Win32Game& game)
 {
-	// Open the DLL to see if it's locked or not. If it is, try again later.
-	HANDLE dll_file = CreateFile(source, GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+	// Open the DLL to see if it's locked or not. If it is, try again later. TOOD(ted): set 0 instead of GENERIC_READ?
+	HANDLE dll_file = CreateFileA(game.source_dll, GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
 	if (dll_file == INVALID_HANDLE_VALUE)
 		return;
 
@@ -309,10 +316,10 @@ static void Win32LoadGame(Win32Game& game, const wchar_t* source, wchar_t* desti
 		WIN32_ASSERT(FreeLibrary(game.dll_handle) != 0, "Unable to free dll library.\n");
 
 	// Copy the file so the 'source' file is still available for editing whem game is running.
-	WIN32_ASSERT(CopyFile(source, destination, FALSE) != 0, "Copy failed.\n");
+	WIN32_ASSERT(CopyFile(game.source_dll, game.runtime_dll, FALSE) != 0, "Copy failed.\n");
 
 	// Load the copy DLL.
-	game.dll_handle = LoadLibrary(destination);
+	game.dll_handle = LoadLibrary(game.runtime_dll);
 	
 	FILETIME ftCreate = { 0 };
 	FILETIME ftAccess = { 0 };
@@ -340,21 +347,152 @@ static void Win32LoadGame(Win32Game& game, const wchar_t* source, wchar_t* desti
 		WIN32_REPORT_ERROR("Couldn't load all game functions!\n");
 }
 
-static void Win32HotloadGame(Win32Game& game, const wchar_t* source, wchar_t* destination)
-{
-	FILETIME write_time = Win32GetLastFileWriteTime(source);
-	if (CompareFileTime(&write_time, &game.time_loaded) == 0)
-		return;
-	else
-		Win32LoadGame(game, source, destination);
 
+static void Win32HotloadGame(Win32Game& game, const char* source, char* destination)
+{
+	FILETIME write_time = Win32GetLastFileWriteTime(game.source_dll);
+	if (CompareFileTime(&write_time, &game.time_loaded) != 0)
+		Win32LoadGame(game);
+}
+
+
+Array<u8> Win32ReadAsset(const char* name, Memory& memory)
+{
+	char path[MAX_PATH + 64];  // @Unstable(ted): 'MAX_PATH' might be too small.
+	char data[] = "../data/";
+
+	for (size_t i = 0; i < sizeof(data)-1; ++i)
+		path[i] = data[i];
+
+	for (size_t i = 0; i < MAX_PATH; i++)
+		path[sizeof(data) + i] = name[i];
+
+
+	// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
+	// "The name [...]. You may use either forward slashes (/) or backslashes () in this name."
+	// NOTE(ted): We always user forward slashes.
+	HANDLE handle = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	DWORD bytes_read = 0;
+
+	DWORD error = GetLastError();
+	if (error == ERROR_FILE_NOT_FOUND)
+	{
+		WIN32_REPORT_ERROR("Asset '%s' doesn't exist\n", name);
+	}
+	
+	DWORD file_size = GetFileSize(handle, NULL);
+	if (file_size == INVALID_FILE_SIZE)
+	{
+		WIN32_REPORT_ERROR("Invalid size of asset '%s'\n", name);
+		// Deallocate asset!
+		Array<u8> fail = { 0 };
+		return fail;
+	}
+
+	Array<u8> array = AllocateArray(memory.persistent, file_size);  // @LEAK(ted): Should not be stored in persistant memory.
+	bool success = true;
+	if (!ReadFile(handle, array.data, array.count, &bytes_read, NULL))
+	{
+		WIN32_REPORT_ERROR("Failed to write to '%s'\n", name);
+		success = false;
+	}
+	else if (!CloseHandle(handle))
+	{
+		WIN32_REPORT_ERROR("Failed to close resource '%s'\n", name);
+		success = false;
+	}
+	else if (bytes_read != array.count)
+	{
+		WIN32_REPORT_ERROR("Only %d bytes out of %d bytes were read\n", bytes_read, array.count);
+		success = false;
+	}
+	
+	if (!success)
+	{
+		// Deallocate asset!
+		Array<u8> fail = { 0 };
+		return fail;
+	}
+
+	return array;
+}
+
+
+bool Win32WriteAsset(const char* name, Buffer buffer)
+{
+	// For now, store this directly in a file. In the future, it might be cached in our memory struct as well, and pushed
+	// to non-volatile memory if we need more volatile space.
+
+	char path[MAX_PATH + 64];  // @Unstable(ted): 'MAX_PATH' might be too small.
+	char data[] = "../data/";
+
+	for (size_t i = 0; i < sizeof(data) - 1; ++i)
+		path[i] = data[i];
+
+	for (size_t i = 0; i < MAX_PATH; i++)
+		path[sizeof(data) + i] = name[i];
+
+	// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
+	// "The name [...]. You may use either forward slashes (/) or backslashes () in this name."
+	// NOTE(ted): We always user forward slashes.
+	HANDLE handle = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (handle == INVALID_HANDLE_VALUE)
+		return false;
+
+	DWORD error = GetLastError();
+	if (error == ERROR_ALREADY_EXISTS)
+		WIN32_REPORT_ERROR("Overriding asset '%s'\n", name);  // TODO(ted): Log instead.
+
+	DWORD bytes_written = 0;
+	if (!WriteFile(handle, buffer.data, buffer.size, &bytes_written, NULL))
+	{
+		WIN32_REPORT_ERROR("Failed to write to '%s'\n", name);
+		return false;
+	}
+	else if (!CloseHandle(handle))
+	{
+		WIN32_REPORT_ERROR("Failed to close resource '%s'\n", name);
+		return false;
+	}
+	else if (bytes_written != buffer.size)
+	{
+		WIN32_REPORT_ERROR("Only %d bytes out of %d bytes were written\n", bytes_written, buffer.size);
+		return false;
+	}
+	else
+	{
+		return true;
+	}
+}
+
+struct FrameStats
+{
+	f32 time_min,   time_one_fourth,   time_average,   time_three_fourth,   time_max;
+	f32 cycles_min, cycles_one_fourth, cycles_average, cycles_three_fourth, cycles_max;
+};
+
+FrameStats GetFrameStats(u64* time_results, u8 time_result_count, u64* cycle_results, u8 cycle_result_count)
+{
+	BubbleSort(time_results,  time_result_count);
+	BubbleSort(cycle_results, cycle_result_count);
+
+	u64 i = time_result_count  - 1;
+	u64 j = cycle_result_count - 1;
+
+	FrameStats stats =
+	{
+		time_results[0] / 1000000.0f,  time_results[i / 4] / 1000000.0f,  time_results[i / 2] / 1000000.0f,  time_results[3 * i / 4] / 1000000.0f,  time_results[i] / 1000000.0f,
+		cycle_results[0] / 1000000.0f, cycle_results[j / 4] / 1000000.0f, cycle_results[j / 2] / 1000000.0f, cycle_results[3 * j / 4] / 1000000.0f, cycle_results[j] / 1000000.0f
+	};
+
+	return stats;
 }
 
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_arguments, int show_code)
 {
 	// Register the window class.
-	const WCHAR CLASS_NAME[] = L"Windows platform";
+	const char CLASS_NAME[] = "Windows platform";
 
 	WNDCLASS window_class = { 0 };
 
@@ -369,10 +507,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_argument
 	}
 
 	// Create the window.
-	HWND window = CreateWindowEx(
+	HWND window = CreateWindowExA(
 		0,                              // Optional window styles.
 		CLASS_NAME,                     // Window class
-		L"Windows platform",			// Window text
+		"Windows platform",				// Window text
 		WS_OVERLAPPEDWINDOW,            // Window style
 
 		// Size and position
@@ -391,7 +529,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_argument
 
 	ShowWindow(window, show_code);
 
-	QueryPerformanceFrequency(&performance_frequency);
+	InitializeTimeModule();
 
 	static Keyboard keyboard;
 
@@ -400,70 +538,147 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_argument
 	u8*	   raw_memory  = cast(VirtualAlloc(start_up_location, memory_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE), u8*);
 
 	Memory memory = { 0 };
-	memory.persistent.count = memory_size / 2;
-	memory.persistent.used  = 0;
-	memory.persistent.data  = raw_memory;
-	memory.temporary.count  = memory_size / 2;
-	memory.temporary.used	= 0;
-	memory.temporary.data	= raw_memory + memory_size / 2;
+	memory.persistent.size = memory_size / 2;
+	memory.persistent.used = 0;
+	memory.persistent.data = raw_memory;
+	memory.temporary.size  = memory_size / 2;
+	memory.temporary.used  = 0;
+	memory.temporary.data  = raw_memory + memory_size / 2;
 	memory.initialized = false;
+	memory.WriteAsset = Win32WriteAsset;
+	memory.ReadAsset  = Win32ReadAsset;
 
 
-	wchar_t path[MAX_PATH];  // NOTE(ted): 'MAX_PATH' can be too small...
+	char path[MAX_PATH];  // NOTE(ted): 'MAX_PATH' can be too small...
 	Win32GetExecutableDirectory(path, sizeof(path));
 
-	wchar_t source[MAX_PATH + sizeof(L"main.dll")];
-	wchar_t destination[MAX_PATH + sizeof(L"main_temp.dll")];
+	char source[MAX_PATH + sizeof("main.dll")];
+	char destination[MAX_PATH + sizeof("main_temp.dll")];
+
+	{
+		int i;
+		for (i = 0; i < MAX_PATH; ++i)
+		{
+			if (path[i] == '\0')
+				break;
+			source[i] = path[i];
+			destination[i] = path[i];
+		}
+		int j = i;
+		for (char character : "main.dll")
+		{
+			source[i++] = character;
+		}
+		for (char character : "main_temp.dll")
+		{
+			destination[j++] = character;
+		}
+		source[i++] = '\0';
+		destination[j++] = '\0';
+	}
+
 	
-	int i;
-	for (i = 0; i < MAX_PATH; ++i)
-	{
-		if (path[i] == '\0')
-			break;
-		source[i] = path[i];
-		destination[i] = path[i];
-	}
-	int j = i;
-	for (wchar_t character : L"main.dll")
-	{
-		source[i++] = character;
-	}
-	for (wchar_t character : L"main_temp.dll")
-	{
-		destination[j++] = character;
-	}
-	source[i++] = '\0';
-	destination[j++] = '\0';
-
-
-
 	Win32Game win32_game = { 0 };
-	Win32LoadGame(win32_game, source, destination);
+	win32_game.source_dll  = source;
+	win32_game.runtime_dll = destination;
+	Win32LoadGame(win32_game);
+
 	win32_game.initialize(memory);
 
-	Win32PerformanceCounter start = Win32CreatePerformanceCounter();
+	// @TODO(ted): Query the actual refresh rate.
+	u32 monitor_refresh_rate = 60;
+	u32 game_refresh_rate = monitor_refresh_rate / 2;  // @NOTE(ted): The game should have a fixed update rate that is a multiple of the monitor's refresh rate.
+	f32 target_seconds_per_frame = 1.0f / game_refresh_rate;
+
+	NanoClock frame_clock;
+	NanoClock game_clock;
+	NanoClock stat_output_clock;
+
+	// Stats
+	u8  frame_time_result_count = 0;
+	u64 frame_time_results[255];
+	u8  frame_cycle_result_count = 0;
+	u64 frame_cycle_results[255];
+
+	u8  game_time_result_count = 0;
+	u64 game_time_results[255];
+	u8  game_cycle_result_count = 0;
+	u64 game_cycle_results[255];
+
+	u16 frames = 0;
 
 	running = true;
 	while (running)
 	{
-		f32 dt = Win32TickPerformanceCounter(start);
+		u64 frame_cylce_start = CycleCount();
 
 		Win32ProcessEvents(keyboard);
 
-		win32_game.update(memory, game_framebuffer, keyboard, dt);
+		Tick(game_clock);
+		u64 game_cylce_start = CycleCount();
+		win32_game.update(memory, game_framebuffer, keyboard, target_seconds_per_frame);
+		game_cycle_results[game_cycle_result_count++] = CycleCount() - game_cylce_start;
+		game_time_results[game_time_result_count++]   = Tick(game_clock);;
 
+
+		WIN32_ASSERT(win32_framebuffer.width == game_framebuffer.width && win32_framebuffer.height == game_framebuffer.height, "Win32 framebuffer and game framebuffer is not synchronized!");
+		for (int i = 0; i < game_framebuffer.width * game_framebuffer.height; ++i)
+		{
+			Pixel& color = game_framebuffer.pixels[i];
+			win32_framebuffer.pixels[i] = PackBGRA(
+				ExactLinearTosRGB(color.r) * 255.0f,
+				ExactLinearTosRGB(color.g) * 255.0f,
+				ExactLinearTosRGB(color.b) * 255.0f,
+				ExactLinearTosRGB(color.a) * 255.0f
+			);
+		}
 
 		RECT client_rect;
 		GetClientRect(window, &client_rect);
 
-		u32 width  = client_rect.right  - client_rect.left;
-		u32 height = client_rect.bottom - client_rect.top;
-
 		HDC device_context = GetDC(window);
-		Win32UpdateWindow(device_context, win32_framebuffer, game_framebuffer, width, height);
+		Win32UpdateWindow(device_context, win32_framebuffer, client_rect);
+		ReleaseDC(window, device_context);
 
-		
 		Win32HotloadGame(win32_game, source, destination);
+
+
+		u64 dt = Tick(frame_clock, RoundToU32(SECONDS_TO_NANO(target_seconds_per_frame)));
+
+		// ---- FRAME COUNT ----
+		frame_cycle_results[frame_cycle_result_count++] = CycleCount() - frame_cylce_start;
+		frame_time_results[frame_time_result_count++] = dt;
+		++frames;
+
+		if (Timer(stat_output_clock, SECONDS_TO_NANO(1)))
+		{
+			static char buffer[1024] = { 0 };
+
+			FrameStats frame_stats = GetFrameStats(frame_time_results, frame_time_result_count, frame_cycle_results, frame_cycle_result_count);
+			FrameStats game_stats  = GetFrameStats(game_time_results,  game_time_result_count,  game_cycle_results,  game_cycle_result_count);
+			
+			sprintf(buffer,
+				"\n	-------- STATS --------\n"
+				"\t                    :  MIN   | 1/4'th |  AVG   | 3/4'th |  MAX \n"
+				"\tFrame: Time (ms)    : %6.2f | %6.2f | %6.2f | %6.2f | %6.2f\n"
+				"\tFrame: Cycles (MHz) : %6.2f | %6.2f | %6.2f | %6.2f | %6.2f\n"
+				"\tGame:  Time (ms)    : %6.2f | %6.2f | %6.2f | %6.2f | %6.2f\n"
+				"\tGame:  Cycles (MHz) : %6.2f | %6.2f | %6.2f | %6.2f | %6.2f\n"
+				"\tFrames per second   :  %i\n",
+				frame_stats.time_min,   frame_stats.time_one_fourth,   frame_stats.time_average,   frame_stats.time_three_fourth,   frame_stats.time_max,
+				frame_stats.cycles_min, frame_stats.cycles_one_fourth, frame_stats.cycles_average, frame_stats.cycles_three_fourth, frame_stats.cycles_max,
+				game_stats.time_min,    game_stats.time_one_fourth,    game_stats.time_average,    game_stats.time_three_fourth,    game_stats.time_max,
+				game_stats.cycles_min,  game_stats.cycles_one_fourth,  game_stats.cycles_average,  game_stats.cycles_three_fourth,  game_stats.cycles_max,
+				frames
+			);
+			OutputDebugStringA(buffer);
+
+			frames = 0;
+			frame_cycle_result_count = 0;
+			frame_time_result_count  = 0;
+			game_cycle_result_count  = 0;
+			game_time_result_count   = 0;
+		}
 	}
 
 	return 0;

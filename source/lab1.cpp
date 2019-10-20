@@ -6,19 +6,16 @@
 #include <glm/glm.hpp>
 
 
-#define MAX_U64 0xFFFFFFFFFFFFFFFF
-
-
 using glm::vec3;
 using glm::vec4;
 
 enum class State { RAINBOW, STAR_FIELD };
 
-static const glm::vec4 WHITE  (1.0f, 1.0f, 1.0f, 1.0f);
-static const glm::vec4 RED    (1.0f, 0.0f, 0.0f, 1.0f);
-static const glm::vec4 BLUE   (0.0f, 0.0f, 1.0f, 1.0f);
-static const glm::vec4 YELLOW (0.0f, 1.0f, 1.0f, 1.0f);
-static const glm::vec4 GREEN  (0.0f, 1.0f, 0.0f, 1.0f);
+static const Pixel WHITE  (1.0f, 1.0f, 1.0f, 1.0f);
+static const Pixel RED    (1.0f, 0.0f, 0.0f, 1.0f);
+static const Pixel BLUE   (0.0f, 0.0f, 1.0f, 1.0f);
+static const Pixel YELLOW (0.0f, 1.0f, 1.0f, 1.0f);
+static const Pixel GREEN  (0.0f, 1.0f, 0.0f, 1.0f);
 
 
 struct GameState
@@ -29,7 +26,7 @@ struct GameState
 	float normal_star_speed;
 	float fast_star_speed;
 
-	Array<vec3>* star_field;
+	Array<vec3> star_field;
 };
 
 
@@ -64,152 +61,86 @@ static f32 RandomBilateral()
 }
 
 
-void Clear(FrameBuffer& framebuffer, u8 channel_value)
+void Clear(FrameBuffer& framebuffer, vec3 background)
 {
-	size_t size = cast(framebuffer.width, size_t) * cast(framebuffer.height, size_t) * sizeof(Pixel);
-	memset(framebuffer.pixels, channel_value, size);
+	Pixel pixel = { background.r, background.g, background.b, 1.0f };
+	for (s32 row = 0; row < framebuffer.height; row++)
+	{
+		for (s32 column = 0; column < framebuffer.width; column++)
+		{
+			framebuffer.pixels[row * framebuffer.width + column] = pixel;
+		}
+	}
 }
 
 
 void Interpolate(Array<vec4>& buffer, const vec4 start, const vec4 stop)
 {
 	u32 samples = buffer.count;
-
-	if (samples == 1)
-	{
-		buffer.data[0] = start;
+	
+	if (samples <= 0)
 		return;
-	}
-
-    const vec4 delta = (stop - start) / cast(samples-1, float);  // Avoiding off-by-one error.
-	vec4 value = start;
 
     for (u32 i = 0; i < samples; ++i)
     {
-		buffer.data[i] = value;
-        value += delta;
+		f32 factor = cast(i, f32) / cast(samples-1, f32);
+		buffer.data[i] = start * (1 - factor)  +  stop * factor;
     }
 }
 
-void Interpolate2D(Array2D<vec4>& buffer, const vec4 topleft, const vec4 bottomleft, const vec4 topright, const vec4 bottomright)
+void Interpolate2D(FrameBuffer& framebuffer, const Pixel topleft, const Pixel bottomleft, const Pixel topright, const Pixel bottomright)
 {
-	u32 y_samples = buffer.rows;
-	u32 x_samples = buffer.columns;
+	u16 y_samples = framebuffer.height;
+	u16 x_samples = framebuffer.width;
 
-	u32 first_x = 0;
-	u32 last_x  = buffer.columns - 1;
+	if (y_samples <= 1 || x_samples <= 1)
+		return;
+
+	u16 last_x = framebuffer.width - 1;
 
 	// INTERPOLATE LEFT COLUMN
+	for (u16 row = 0; row < y_samples; ++row)
 	{
-		if (y_samples == 1)
-		{
-			buffer.data[first_x] = topleft;
-			return;
-		}
-
-		const vec4 delta = (bottomleft - topleft) / cast(y_samples - 1, f32);  // Avoiding off-by-one error.
-		vec4 value = topleft;
-
-		for (u32 i = 0; i < y_samples; ++i)
-		{
-			buffer.data[i * buffer.columns + first_x] = value;
-			value += delta;
-		}
+		f32 factor = cast(row, f32) / cast(y_samples - 1, f32);
+		framebuffer(row, 0) = topleft * (1 - factor) + bottomleft * factor;
 	}
 
 	// INTERPOLATE RIGHT COLUMN
+	for (u16 row = 0; row < y_samples; ++row)
 	{
-		if (y_samples == 1)
-		{
-			buffer.data[last_x] = topright;
-			return;
-		}
-
-		const vec4 delta = (bottomright - topright) / cast(y_samples - 1, f32);  // Avoiding off-by-one error.
-		vec4 value = topright;
-
-		for (u32 i = 0; i < y_samples; ++i)
-		{
-			buffer.data[i * buffer.columns + last_x] = value;
-			value += delta;
-		}
+		f32 factor = cast(row, f32) / cast(y_samples - 1, f32);
+		framebuffer(row, last_x) = topright * (1 - factor) + bottomright * factor;
 	}
 
 	// INTERPOLATE ROWS
+	for (u16 row = 0; row < y_samples; ++row)
 	{
-		if (x_samples == 1)
+		for (u16 column = 1; column < x_samples-1; column++)
 		{
-			return;
-		}
-
-		for (u32 row = 0; row < y_samples; ++row)
-		{
-			vec4 left  = buffer.data[row * buffer.columns + first_x];
-			vec4 right = buffer.data[row * buffer.columns + last_x];
-
-			const vec4 delta = (right - left) / cast(x_samples - 1, f32);  // Avoiding off-by-one error.
-			vec4 value = left + delta;
-
-			for (u32 column = first_x + 1; column < last_x; ++column)
-			{
-				buffer.data[row * buffer.rows + column] = value;
-				value += delta;
-			}
-		}
+			f32 factor = cast(column, f32) / cast(x_samples - 1, f32);
+			framebuffer(row, column) = framebuffer(row, 0) * (1 - factor) + framebuffer(row, last_x) * factor;
+		}	
 	}
 }
 
 
-void Rainbow(Memory& memory, FrameBuffer& framebuffer)
+void Rainbow(FrameBuffer& framebuffer)
 {
-	Array<vec4>* left_column  = PushStackArray<vec4>(memory, framebuffer.height);
-	Array<vec4>* right_column = PushStackArray<vec4>(memory, framebuffer.height);
-	Array<vec4>* row_colors   = PushStackArray<vec4>(memory, framebuffer.width);
-
-    Interpolate(*left_column,  RED,  YELLOW);
-    Interpolate(*right_column, BLUE, GREEN);
-
-    for (s32 row = 0; row < framebuffer.height; ++row)
-    {
-        Interpolate(*row_colors, left_column->data[row], right_column->data[row]);
-
-        for (s32 column = 0; column < cast(row_colors->count, s32); ++column)
-        {
-			vec4 color = row_colors->data[column];
-
-			const auto min = vec4(0, 0, 0, 1);
-			const auto max = vec4(1, 1, 1, 1);
-
-			const auto final_color = glm::clamp(color, min, max);
-
-			Pixel& pixel = framebuffer.pixels[row * framebuffer.width + column];
-			pixel.r = final_color.r;
-			pixel.g = final_color.g;
-			pixel.b = final_color.b;
-			pixel.a = final_color.a;
-        }
-
-    }
-
-	PopStackArray(memory, row_colors);
-	PopStackArray(memory, right_column);
-	PopStackArray(memory, left_column);
+	Interpolate2D(framebuffer, RED, GREEN, BLUE, YELLOW);
 }
 
 
-Array<vec3>* CreateStarField(Memory& memory, const u32 star_count)
+Array<vec3> CreateStarField(Memory& memory, const u32 star_count)
 {
-	Array<vec3>* star_field = AllocatePersistantArray<vec3>(memory, star_count, 10);
-	if (star_field == 0)
-		return 0;
+	Array<vec3> star_field = AllocateArray<vec3>(memory.persistent, star_count, 10);
 
-	for (u32 i = 0; i < star_field->count; ++i)
+	for (u32 i = 0; i < star_field.count; ++i)
 	{
 		float x = RandomBilateral();
 		float y = RandomBilateral();
 		float z = RandomUnilateral();
 
-		star_field->data[i] = vec3(x, y, z);
+		star_field.data[i] = vec3(x, y, z);
 	}
 
     return star_field;
@@ -243,27 +174,20 @@ void DrawStarField(FrameBuffer& framebuffer, const Array<vec3>& star_field)
         const float u = focal_length * (position.x / position.z) + framebuffer.width  / 2.0f;
         const float v = focal_length * (position.y / position.z) + framebuffer.height / 2.0f;
 
-		s32 col = RoundToS32(u);
-		s32 row = RoundToS32(v);
-
-		if (!(0 <= col && col < framebuffer.width && 0 <= row && row < framebuffer.height))
+		if (!(0 <= u && u < framebuffer.width && 0 <= v && v < framebuffer.height))
 			continue;
 
-		u32 index = cast(row * framebuffer.width + col, u32);
+		u16 column = FloorToU16(u);
+		u16 row	   = FloorToU16(v);
 
 		// Fade the further the stars are.
-        const vec4 color = (0.2f * WHITE) / (position.z * position.z);
+        const vec4 color = vec4(1.0f, 1.0f, 1.0f, 1.0f) * (1.0f - position.z);
 
-        const auto min = vec4(0, 0, 0, 1);
-        const auto max = vec4(1, 1, 1, 1);
-
-		const auto final_color = glm::clamp(color, min, max);
-
-		Pixel& pixel = framebuffer.pixels[index];
-		pixel.r = final_color.r;
-		pixel.g = final_color.g;
-		pixel.b = final_color.b;
-		pixel.a = final_color.a;
+		Pixel& pixel = framebuffer(row, column);
+		pixel.r = color.r;
+		pixel.g = color.g;
+		pixel.b = color.b;
+		pixel.a = color.a;
     }
 }
 
@@ -273,7 +197,7 @@ void Initialize(Memory& memory)
 {
 	if (!memory.initialized)
 	{
-		GameState* state = AllocatePersistantObject<GameState>(memory);
+		GameState* state = AllocateObject<GameState>(memory.persistent);
 
 		state->state = State::STAR_FIELD;
 		state->star_velocity	 = vec3(0.0f, 0.0f, 0.1f);
@@ -299,9 +223,9 @@ void Update(Memory& memory, FrameBuffer& framebuffer, Keyboard& keyboard, f32 dt
         if (key.ended_on_down)
         {
             if (key.character == 'Q')
-                Clear(framebuffer, 255);
+                Clear(framebuffer, vec3(0.0f, 0.0f, 0.0f));
             else if (key.character == 'P')
-                Screenshot(framebuffer, "screenshots/lab1/screenshot.png");
+                Screenshot(framebuffer, "../screenshots/lab1/screenshot.png");
             else if (key.character == 'W')
 				state->star_velocity.z = state->fast_star_speed;
             else if (key.character == 'A')
@@ -333,16 +257,16 @@ void Update(Memory& memory, FrameBuffer& framebuffer, Keyboard& keyboard, f32 dt
 
 	if (state->state == State::RAINBOW)
 	{
-	    Rainbow(memory, framebuffer);
+	    Rainbow(framebuffer);
 	}
 	else
 	{
 	    // --- UPDATE ----
-	    MoveStarField(*state->star_field, state->star_velocity * dt);
+	    MoveStarField(state->star_field, state->star_velocity * dt);
 	
 	    // --- RENDER ----
-	    Clear(framebuffer, 0);
-	    DrawStarField(framebuffer, *state->star_field);
+		Clear(framebuffer, vec3(0.0f, 0.0f, 0.0f));
+	    DrawStarField(framebuffer, state->star_field);
 	}
 }
 

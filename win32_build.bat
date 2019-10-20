@@ -49,7 +49,7 @@ set PDB_OUTPUT="temp_%date:~-4,4%%date:~-10,2%%date:~-7,2%_%time:~0,2%%time:~3,2
 
 set WARNINGS=-W4 -WX -wd4100 -wd4201 -wd4505
 
-set SHARED_COMPILER_FLAGS=-Oi -MT -fp:fast -nologo -GR- -EHa- -DUNICODE -D_CRT_SECURE_NO_WARNINGS %WARNINGS%
+set SHARED_COMPILER_FLAGS=-Oi -MT -fp:fast -nologo -GR- -EHa- -D_CRT_SECURE_NO_WARNINGS %WARNINGS%
 set SHARED_LINKER_FLAGS=-incremental:no -opt:ref
 
 set WIN32_COMPILER_FLAGS=

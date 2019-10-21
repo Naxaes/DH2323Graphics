@@ -1,1 +1,0 @@
-/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++  -Wall -Wextra -Wpedantic -O0 -g -fsanitize=address -fno-omit-frame-pointer -Wl,-search_paths_first -Wl,-headerpad_max_install_names  CMakeFiles/TestInterpolation.dir/tests/interpolation.cpp.o  -o TestInterpolation 

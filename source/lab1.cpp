@@ -9,7 +9,7 @@
 using glm::vec3;
 using glm::vec4;
 
-enum class State { RAINBOW, STAR_FIELD };
+enum class State { RAINBOW, STAR_FIELD, STATIC_IMAGE };
 
 static const Pixel WHITE  (1.0f, 1.0f, 1.0f, 1.0f);
 static const Pixel RED    (1.0f, 0.0f, 0.0f, 1.0f);
@@ -222,10 +222,12 @@ void Update(Memory& memory, FrameBuffer& framebuffer, Keyboard& keyboard, f32 dt
 
         if (key.ended_on_down)
         {
-            if (key.character == 'Q')
-                Clear(framebuffer, vec3(0.0f, 0.0f, 0.0f));
-            else if (key.character == 'P')
-                Screenshot(framebuffer, "../screenshots/lab1/screenshot.png");
+			if (key.character == 'Q')
+				Clear(framebuffer, vec3(0.0f, 0.0f, 0.0f));
+			else if (key.character == 'P')
+				WriteImage(memory, framebuffer, "screenshots/lab1/screenshot.png");
+			else if (key.character == 'O')
+			{	framebuffer = ReadImage(memory, "screenshots/lab1/screenshot.png"); state->state = State::STATIC_IMAGE; }
             else if (key.character == 'W')
 				state->star_velocity.z = state->fast_star_speed;
             else if (key.character == 'A')
@@ -240,6 +242,8 @@ void Update(Memory& memory, FrameBuffer& framebuffer, Keyboard& keyboard, f32 dt
 					state->state = State::STAR_FIELD;
                 else if (state->state == State::STAR_FIELD)
 					state->state = State::RAINBOW;
+				else
+					state->state = State::STAR_FIELD;
             }
         }
         else
@@ -259,7 +263,7 @@ void Update(Memory& memory, FrameBuffer& framebuffer, Keyboard& keyboard, f32 dt
 	{
 	    Rainbow(framebuffer);
 	}
-	else
+	else if (state->state == State::STAR_FIELD)
 	{
 	    // --- UPDATE ----
 	    MoveStarField(state->star_field, state->star_velocity * dt);
@@ -267,6 +271,10 @@ void Update(Memory& memory, FrameBuffer& framebuffer, Keyboard& keyboard, f32 dt
 	    // --- RENDER ----
 		Clear(framebuffer, vec3(0.0f, 0.0f, 0.0f));
 	    DrawStarField(framebuffer, state->star_field);
+	}
+	else
+	{
+		
 	}
 }
 

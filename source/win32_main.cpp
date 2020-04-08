@@ -365,7 +365,11 @@ Array<u8> Win32ReadAsset(const char* name, Memory& memory)
 		path[i] = data[i];
 
 	for (size_t i = 0; i < MAX_PATH; i++)
-		path[sizeof(data) + i] = name[i];
+	{
+		path[sizeof(data) - 1 + i] = name[i];
+		if (name[i] == '\0')
+			break;
+	}
 
 
 	// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
@@ -418,7 +422,7 @@ Array<u8> Win32ReadAsset(const char* name, Memory& memory)
 }
 
 
-bool Win32WriteAsset(const char* name, Buffer buffer)
+bool Win32WriteAsset(const char* name, Array<Array<u8>> buffers)
 {
 	// For now, store this directly in a file. In the future, it might be cached in our memory struct as well, and pushed
 	// to non-volatile memory if we need more volatile space.
@@ -430,7 +434,18 @@ bool Win32WriteAsset(const char* name, Buffer buffer)
 		path[i] = data[i];
 
 	for (size_t i = 0; i < MAX_PATH; i++)
-		path[sizeof(data) + i] = name[i];
+	{
+		path[sizeof(data) - 1 + i] = name[i];
+		if (name[i] == '/')
+		{
+			path[sizeof(data) - 1 + i + 1] = '\0';
+			CreateDirectoryA(path, NULL);
+		}
+		else if (name[i] == '\0')
+		{
+			break;
+		}
+	}
 
 	// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea
 	// "The name [...]. You may use either forward slashes (/) or backslashes () in this name."
@@ -443,20 +458,24 @@ bool Win32WriteAsset(const char* name, Buffer buffer)
 	if (error == ERROR_ALREADY_EXISTS)
 		WIN32_REPORT_ERROR("Overriding asset '%s'\n", name);  // TODO(ted): Log instead.
 
-	DWORD bytes_written = 0;
-	if (!WriteFile(handle, buffer.data, buffer.size, &bytes_written, NULL))
+	for (u32 i = 0; i < buffers.count; ++i)
 	{
-		WIN32_REPORT_ERROR("Failed to write to '%s'\n", name);
-		return false;
+		Array<u8>& buffer = buffers.data[i];
+		DWORD bytes_written = 0;
+		if (!WriteFile(handle, buffer.data, buffer.count, &bytes_written, NULL))
+		{
+			WIN32_REPORT_ERROR("Failed to write to '%s'\n", name);
+			return false;
+		}
+		else if (bytes_written != buffer.count)
+		{
+			WIN32_REPORT_ERROR("Only %d bytes out of %d bytes were written\n", bytes_written, buffer.count);
+			return false;
+		}
 	}
-	else if (!CloseHandle(handle))
+	if (!CloseHandle(handle))
 	{
 		WIN32_REPORT_ERROR("Failed to close resource '%s'\n", name);
-		return false;
-	}
-	else if (bytes_written != buffer.size)
-	{
-		WIN32_REPORT_ERROR("Only %d bytes out of %d bytes were written\n", bytes_written, buffer.size);
 		return false;
 	}
 	else
@@ -625,12 +644,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_argument
 		for (int i = 0; i < game_framebuffer.width * game_framebuffer.height; ++i)
 		{
 			Pixel& color = game_framebuffer.pixels[i];
-			win32_framebuffer.pixels[i] = PackBGRA(
-				ExactLinearTosRGB(color.r) * 255.0f,
-				ExactLinearTosRGB(color.g) * 255.0f,
-				ExactLinearTosRGB(color.b) * 255.0f,
-				ExactLinearTosRGB(color.a) * 255.0f
-			);
+			win32_framebuffer.pixels[i] = PackBGRA(color.r * 255.0f, color.g * 255.0f, color.b * 255.0f, color.a * 255.0f);
 		}
 
 		RECT client_rect;
@@ -645,7 +659,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_argument
 
 		u64 dt = Tick(frame_clock, RoundToU32(SECONDS_TO_NANO(target_seconds_per_frame)));
 
-		// ---- FRAME COUNT ----
+		// ---- Stat ----
 		frame_cycle_results[frame_cycle_result_count++] = CycleCount() - frame_cylce_start;
 		frame_time_results[frame_time_result_count++] = dt;
 		++frames;

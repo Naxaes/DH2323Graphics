@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <math.h>
+#include <string.h>
 
 // FIX(ted): THIS PRESUMABLY ONLY WORKS ON UNIX. FIX!
 #include <signal.h>    // raise(SIGINT)
@@ -102,7 +103,7 @@ struct Array2D
 
 struct Memory;
 
-typedef bool	  (*PlatformWriteAsset) (const char* name, Buffer buffer);
+typedef bool	  (*PlatformWriteAsset) (const char* name, const Array<Array<u8>> buffers);
 typedef Array<u8> (*PlatformReadAsset)  (const char* name, Memory& memory);
 
 struct Memory
@@ -132,7 +133,7 @@ Array<T> AllocateArray(Buffer& memory, u32 count, u32 decrement_if_fail = 0, u32
 	u32 used_memory_after_allocation = memory.used + total_size;
 	while (used_memory_after_allocation >= memory.size || HasOverflown(memory.used, total_size, used_memory_after_allocation))
 	{
-		if (count > minimum_allowed_count && decrement_if_fail != 0)
+		if (count < minimum_allowed_count || decrement_if_fail == 0)
 		{
 			array.count = 0;
 			array.data  = 0;
@@ -244,19 +245,41 @@ u32 PackRGBA(f32 r, f32 g, f32 b, f32 a)
 	return result;
 }
 
+Pixel UnPackRGBA(u32 data)
+{
+	f32 r = cast((data >> 0)  & 0x000000FF, f32);
+	f32 g = cast((data >> 8)  & 0x000000FF, f32);
+	f32 b = cast((data >> 16) & 0x000000FF, f32);
+	f32 a = cast((data >> 24) & 0x000000FF, f32);
+
+	Pixel pixel = Pixel(r, g, b, a);
+	return pixel;
+}
+
 u32 PackBGRA(f32 r, f32 g, f32 b, f32 a)
 {
 	u32 result = (RoundToU32(a) << 24) |
 				 (RoundToU32(r) << 16) |
-				 (RoundToU32(g) << 8) |
+				 (RoundToU32(g) << 8)  |
 				 (RoundToU32(b) << 0);
 
 	return result;
 }
 
-bool Screenshot(FrameBuffer buffer, const char* file_name)
+Pixel UnPackBGRA(u32 data)
 {
-	u32 size_of_image = buffer.width * buffer.height * sizeof(Pixel);
+	f32 b = cast((data >> 0) & 0x000000FF, f32);
+	f32 g = cast((data >> 8) & 0x000000FF, f32);
+	f32 r = cast((data >> 16) & 0x000000FF, f32);
+	f32 a = cast((data >> 24) & 0x000000FF, f32);
+
+	Pixel pixel = Pixel(r, g, b, a);
+	return pixel;
+}
+
+void WriteImage(Memory memory, FrameBuffer framebuffer, const char* file_name)
+{
+	u32 size_of_image = framebuffer.width * framebuffer.height * sizeof(u32);
 
 	BitmapHeader header = {};
 
@@ -264,8 +287,8 @@ bool Screenshot(FrameBuffer buffer, const char* file_name)
 	header.file_size = sizeof(header) + size_of_image;
 	header.bitmap_offset = sizeof(header);
 	header.size = sizeof(header) - 14;
-	header.width =  buffer.width;
-	header.height = buffer.height;  // Negative numbers gives a direction of top-down instead of bottom-up.
+	header.width = framebuffer.width;
+	header.height = -framebuffer.height;  // Negative numbers gives a direction of top-down instead of bottom-up.
 	header.planes = 1;
 	header.bits_per_pixel = 32;
 	header.compression = 0;
@@ -275,31 +298,49 @@ bool Screenshot(FrameBuffer buffer, const char* file_name)
 	header.colors_used = 0;
 	header.colors_important = 0;
 
-	u32* colors = cast(malloc(size_of_image), u32*);
-	for (int i = 0; i < buffer.width * buffer.height; ++i)
+	Array<u8> meta_data  = { sizeof(header), reinterpret_cast<u8*>(&header) };
+	Array<u8> image_data = AllocateArray<u8>(memory.temporary, size_of_image);
+
+	u8* base = image_data.data;
+
+	for (int i = 0; i < framebuffer.width * framebuffer.height; ++i)
 	{
-		Pixel& color = buffer.pixels[i];
-		colors[i] = PackBGRA(
-			ExactLinearTosRGB(color.r) * 255.0f,
-			ExactLinearTosRGB(color.g) * 255.0f,
-			ExactLinearTosRGB(color.b) * 255.0f,
-			ExactLinearTosRGB(color.a) * 255.0f
-		);
+		Pixel& color = framebuffer.pixels[i];
+		u32 formatted_color = PackBGRA(color.r * 255.0f, color.g * 255.0f, color.b * 255.0f, color.a * 255.0f);
+		memcpy(base, &formatted_color, sizeof(formatted_color));
+		base += sizeof(formatted_color);
 	}
 
-	FILE* file = fopen(file_name, "wb");
-	if (file)
+	Array<u8> temp[] = { meta_data, image_data };
+
+	Array<Array<u8>> buffers;
+	buffers.count = 2;
+	buffers.data = temp;
+
+	memory.WriteAsset(file_name, buffers);
+}
+
+FrameBuffer ReadImage(Memory memory, const char* name)
+{
+	Array<u8> asset = memory.ReadAsset(name, memory);
+	u8* base = asset.data;
+
+	BitmapHeader* header = reinterpret_cast<BitmapHeader*>(base);
+	base += sizeof(BitmapHeader);
+
+	FrameBuffer framebuffer;
+	framebuffer.width  = cast(header->width, u16);
+	framebuffer.height = (header->height > 0) ? cast(header->height, u16) : cast(-header->height, u16);
+	framebuffer.pixels = AllocateArray<Pixel>(memory.persistent, framebuffer.width * framebuffer.height).data;
+
+	for (int i = 0; i < framebuffer.width * framebuffer.height; ++i)
 	{
-		fwrite(&header, sizeof(header), 1, file);
-		fwrite(colors, size_of_image, 1, file);
-		fclose(file);
-		return 1;
+		u32* formatted_color = reinterpret_cast<u32*>(base);
+		framebuffer.pixels[i] = UnPackBGRA(*formatted_color) * (1 / 255.0f);
+		base += sizeof(u32);
 	}
-	else
-	{
-		fprintf(stderr, "[Error]: Unable to open output file.\n");
-		return 0;
-	}
+
+	return framebuffer;
 }
 
 

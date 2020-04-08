@@ -174,7 +174,8 @@ void DrawStarField(FrameBuffer& framebuffer, const Array<vec3>& star_field)
         const float u = focal_length * (position.x / position.z) + framebuffer.width  / 2.0f;
         const float v = focal_length * (position.y / position.z) + framebuffer.height / 2.0f;
 
-		if (!(0 <= u && u < framebuffer.width && 0 <= v && v < framebuffer.height))
+		bool inside_frame = (0 <= u && u < framebuffer.width && 0 <= v && v < framebuffer.height);
+		if (!inside_frame)
 			continue;
 
 		u16 column = FloorToU16(u);

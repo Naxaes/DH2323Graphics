@@ -53,7 +53,7 @@ set SHARED_COMPILER_FLAGS=-Oi -MT -fp:fast -nologo -GR- -EHa- -D_CRT_SECURE_NO_W
 set SHARED_LINKER_FLAGS=-incremental:no -opt:ref
 
 set WIN32_COMPILER_FLAGS=
-set WIN32_LINKER_FLAGS=user32.lib gdi32.lib winmm.lib
+set WIN32_LINKER_FLAGS=user32.lib gdi32.lib winmm.lib Xaudio2.lib
 set WIN32_OUTPUT_FILE=
 set WIN32_SOURCE_FILES=..\source\win32_main.cpp
 set WIN32_INCLUDE_FOLDER=

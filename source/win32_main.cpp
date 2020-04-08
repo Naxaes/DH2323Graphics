@@ -2,7 +2,8 @@
 
 #include <windows.h>
 #include <xinput.h>
-#include <dsound.h>
+#include <xaudio2.h>  // #include <dsound.h>
+
 
 #define StringLiteral(x)  {x, sizeof(x) - 1};
 
@@ -57,8 +58,8 @@ struct Win32Game
 {
 	HMODULE  dll_handle;
 	FILETIME time_loaded;
-	char*	 source_dll;
-	char*	 runtime_dll;
+	char*	 source_dll;	// The game's source file.
+	char*	 runtime_dll;	// Temporary copy at runtime (so we still can edit the game's source).
 
 	InitializeFunction initialize;
 	UpdateFunction     update;
@@ -315,7 +316,7 @@ static void Win32LoadGame(Win32Game& game)
 	if (game.dll_handle)
 		WIN32_ASSERT(FreeLibrary(game.dll_handle) != 0, "Unable to free dll library.\n");
 
-	// Copy the file so the 'source' file is still available for editing whem game is running.
+	// Copy the file so the 'source' file is still available for editing when game is running.
 	WIN32_ASSERT(CopyFile(game.source_dll, game.runtime_dll, FALSE) != 0, "Copy failed.\n");
 
 	// Load the copy DLL.
@@ -508,7 +509,83 @@ FrameStats GetFrameStats(u64* time_results, u8 time_result_count, u64* cycle_res
 }
 
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_arguments, int show_code)
+#define fourccRIFF 'FFIR'
+#define fourccDATA 'atad'
+#define fourccFMT ' tmf'
+#define fourccWAVE 'EVAW'
+#define fourccXWMA 'AMWX'
+#define fourccDPDS 'sdpd'
+HRESULT FindChunk(HANDLE audio_file, DWORD fourcc, DWORD& chunk_size, DWORD& chunk_data_position)
+{
+	// Reset the file pointer to the beginning.
+	HRESULT status = S_OK;
+	if (INVALID_SET_FILE_POINTER == SetFilePointer(audio_file, 0, NULL, FILE_BEGIN))
+		return HRESULT_FROM_WIN32(GetLastError());
+
+	u32 chunk_type;
+	u32 chunk_data_size;
+	u32 RIFF_data_size = 0;
+	u32 file_type;  // Either "AVI" or "WAVE".
+	u32 total_bytes_read = 0;
+	u32 offset = 0;	// @TODO(ted): Isn't 'offset' and 'total_bytes_read' the same thing here?
+
+	// Read until we find the 'fourcc' chunk.
+	while (status == S_OK)
+	{
+		DWORD bytes_read;
+		if (0 == ReadFile(audio_file, &chunk_type, sizeof(u32), &bytes_read, NULL))
+			status = HRESULT_FROM_WIN32(GetLastError());
+
+		if (0 == ReadFile(audio_file, &chunk_data_size, sizeof(u32), &bytes_read, NULL))
+			status = HRESULT_FROM_WIN32(GetLastError());
+
+		if (chunk_type == fourccRIFF)
+		{
+			RIFF_data_size  = chunk_data_size;
+			chunk_data_size = 4;
+			if (0 == ReadFile(audio_file, &file_type, sizeof(u32), &bytes_read, NULL))
+				status = HRESULT_FROM_WIN32(GetLastError());
+		}
+		else
+		{
+			if (INVALID_SET_FILE_POINTER == SetFilePointer(audio_file, chunk_data_size, NULL, FILE_CURRENT))
+				return HRESULT_FROM_WIN32(GetLastError());
+		}
+
+		offset += sizeof(u32) * 2;
+
+		if (chunk_type == fourcc)
+		{
+			chunk_size = chunk_data_size;
+			chunk_data_position = offset;
+			return S_OK;
+		}
+
+		offset += chunk_data_size;
+
+		if (total_bytes_read >= RIFF_data_size) 
+			return S_FALSE;
+
+	}
+
+	return S_OK;
+}
+HRESULT ReadChunkData(HANDLE audio_file, void* buffer, DWORD buffer_size, DWORD buffer_offset)
+{
+	HRESULT status = S_OK;
+	
+	if (INVALID_SET_FILE_POINTER == SetFilePointer(audio_file, buffer_offset, NULL, FILE_BEGIN))
+		return HRESULT_FROM_WIN32(GetLastError());
+	
+	DWORD bytes_read;
+	if (0 == ReadFile(audio_file, buffer, buffer_size, &bytes_read, NULL))
+		status = HRESULT_FROM_WIN32(GetLastError());
+	
+	return status;
+}
+
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR command_line_arguments, int show_code)
 {
 	// Register the window class.
 	const char CLASS_NAME[] = "Windows platform";
@@ -549,6 +626,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_argument
 	ShowWindow(window, show_code);
 
 	InitializeTimeModule();
+	// WIN32_ASSERT(Win32InitializeSound() == 0, "Couldn't initialize Sound.");
 
 	static Keyboard keyboard;
 
@@ -625,6 +703,77 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE _, PWSTR command_line_argument
 	u64 game_cycle_results[255];
 
 	u16 frames = 0;
+
+
+	// ---- SOUND ----
+	HRESULT status;
+
+	IXAudio2* audio_engine = NULL;
+	status = XAudio2Create(&audio_engine, 0, XAUDIO2_DEFAULT_PROCESSOR);
+	if (FAILED(status))
+		return status;
+
+	IXAudio2MasteringVoice* audio_master_output = NULL;
+	status = audio_engine->CreateMasteringVoice(&audio_master_output);
+	if (FAILED(status))
+		return status;
+
+
+
+	HANDLE sound_file = CreateFileA("P:\\Source\\DH2323Graphics\\data\\Ring05.wav", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+	if (INVALID_HANDLE_VALUE == sound_file)
+		return HRESULT_FROM_WIN32(GetLastError());
+
+	if (INVALID_SET_FILE_POINTER == SetFilePointer(sound_file, 0, NULL, FILE_BEGIN))
+		return HRESULT_FROM_WIN32(GetLastError());
+
+
+	
+	
+	DWORD chunk_size;
+	DWORD chunk_position;
+
+	{  // Make sure the file type is WAVE.
+		DWORD file_type;
+		FindChunk(sound_file, fourccRIFF, chunk_size, chunk_position);
+		ReadChunkData(sound_file, &file_type, sizeof(DWORD), chunk_position);
+		if (file_type != fourccWAVE)
+			return S_FALSE;
+	}
+
+
+	// Read the format ('fmt ' [the space is important!] chunk) of the wave file.
+	WAVEFORMATEXTENSIBLE wfx = { 0 };
+	FindChunk(sound_file, fourccFMT, chunk_size, chunk_position);
+	ReadChunkData(sound_file, &wfx, chunk_size, chunk_position);
+
+	// Read the audio data ('data' chunk).
+	FindChunk(sound_file, fourccDATA, chunk_size, chunk_position);
+	BYTE* audio_data = new BYTE[chunk_size];
+	ReadChunkData(sound_file, audio_data, chunk_size, chunk_position);
+
+	// Fill out the buffer.
+	XAUDIO2_BUFFER audio_buffer = { 0 };
+	audio_buffer.AudioBytes = chunk_size;
+	audio_buffer.pAudioData = audio_data;
+	audio_buffer.Flags = XAUDIO2_END_OF_STREAM;
+
+
+
+	IXAudio2SourceVoice* audio_source_output;
+	status = audio_engine->CreateSourceVoice(&audio_source_output, (WAVEFORMATEX *)&wfx);
+	if (FAILED(status)) 
+		return status;
+
+	status = audio_source_output->SubmitSourceBuffer(&audio_buffer);
+	if (FAILED(status))
+		return status;
+
+	status = audio_source_output->Start(0);
+	if (FAILED(status))
+		return status;
+
+
 
 	running = true;
 	while (running)

@@ -6,6 +6,8 @@ build/
 out/
 *.sln
 CMakeSettings.json
+cmake-build-release/
+cmake-build-debug/
 
 # Prerequisites
 *.d
